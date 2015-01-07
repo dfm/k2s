@@ -4,13 +4,16 @@ import os
 import glob
 import fitsio
 import numpy as np
-from simplexy import simplexy
-# import matplotlib.pyplot as pl
 from multiprocessing import Pool
 
+from k2s import TimeSeries
 
-dt = np.dtype([("time", np.float32), ("flux", np.float32), ("bkg", np.float32),
-               ("x", np.float32), ("y", np.float32), ("quality", np.int32)])
+
+dt = np.dtype([("cadenceno", np.int32), ("time", np.float32),
+               ("timecorr", np.float32), ("pos_corr1", np.float32),
+               ("pos_corr2", np.float32), ("quality", np.int32),
+               ("flux", np.float32), ("bkg", np.float32),
+               ("x", np.float32), ("y", np.float32)])
 
 
 def process_file(fn):
@@ -31,29 +34,27 @@ def process_file(fn):
     print("{0} -> {1}".format(fn, outfn))
 
     # Read the data.
-    data, hdr = fitsio.read(fn, columns=["TIME", "FLUX", "QUALITY"],
+    data, hdr = fitsio.read(fn,
                             header=True)
     table = np.empty(len(data["TIME"]), dtype=dt)
+
+    # Initialize the new columns to NaN.
     for k in ["x", "y", "flux", "bkg"]:
         table[k] = np.nan
 
-    table["time"] = data["TIME"]
-    table["quality"] = data["QUALITY"]
-    m = np.isfinite(table["time"])
-    print(np.min(table["time"][m]), np.max(table["time"][m]))
+    # Copy across the old columns.
+    for k in ["cadenceno", "time", "timecorr", "pos_corr1", "pos_corr2",
+              "quality"]:
+        table[k] = data[k.upper()]
 
-    for i, frame in enumerate(data["FLUX"]):
-        # Run simplexy on the frame.
-        frame[frame == 0.0] = np.nan
-        try:
-            result = simplexy(frame)
-        except RuntimeError:
+    print(data.dtype)
+    ts = TimeSeries(data["TIME"], data["FLUX"], data["FLUX_ERR"],
+                    data["QUALITY"])
+    for i, frame in enumerate(ts.frames):
+        if not len(frame):
             continue
-        if not len(result):
-            continue
-
         # Save the brightest source to the results table.
-        row = result[0]
+        row = frame.coords[0]
         for k in row.dtype.names:
             table[k][i] = row[k]
 
@@ -63,10 +64,6 @@ def process_file(fn):
     except os.error:
         pass
     fitsio.write(outfn, table, clobber=True, header=hdr)
-
-    # pl.clf()
-    # pl.plot(table["time"], table["flux"], ".k")
-    # pl.savefig(outfn + ".png")
 
 
 filenames = glob.glob("data/c0/202000000/59000/*.fits.gz")
