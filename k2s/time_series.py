@@ -29,8 +29,8 @@ class TimeSeries(object):
 
     def initialize(self):
         # Traverse the graph and construct the (greedy) best path.
-        ns = min(map(len, filter(len, self.frames)))
-        metric = np.array([1.0, 1.0, 1e-8])
+        ns = min(map(len, filter(len, self.frames)) + [np.inf])
+        metric = np.array([1e-10, 1e-10, 1e-10])
         current = None
         for t, node in enumerate(self.frames):
             if not len(node):

@@ -27,15 +27,14 @@ def process_file(fn):
     outfn = os.path.join("lightcurves", pre[len("data/"):],
                          a+"-"+b+"-lc.fits.gz")
 
-    # Don't overwrite.
-    if os.path.exists(outfn):
-        return
+    # # Don't overwrite.
+    # if os.path.exists(outfn):
+    #     return
 
     print("{0} -> {1}".format(fn, outfn))
 
     # Read the data.
-    data, hdr = fitsio.read(fn,
-                            header=True)
+    data, hdr = fitsio.read(fn, header=True)
     table = np.empty(len(data["TIME"]), dtype=dt)
 
     # Initialize the new columns to NaN.
@@ -47,9 +46,11 @@ def process_file(fn):
               "quality"]:
         table[k] = data[k.upper()]
 
-    print(data.dtype)
+    # This step actually does the photometry.
     ts = TimeSeries(data["TIME"], data["FLUX"], data["FLUX_ERR"],
                     data["QUALITY"])
+
+    # Loop over the frames and copy over the output.
     for i, frame in enumerate(ts.frames):
         if not len(frame):
             continue
@@ -57,6 +58,8 @@ def process_file(fn):
         row = frame.coords[0]
         for k in row.dtype.names:
             table[k][i] = row[k]
+
+    print(np.sum(np.isfinite(table["flux"])))
 
     # Save the output file.
     try:
@@ -66,7 +69,8 @@ def process_file(fn):
     fitsio.write(outfn, table, clobber=True, header=hdr)
 
 
-filenames = glob.glob("data/c0/202000000/59000/*.fits.gz")
-# filenames = glob.glob("data/c1/*/*/*.fits.gz")
+# filenames = glob.glob("data/c0/202000000/59000/*202059070*.fits.gz")
+# print(filenames)
+filenames = glob.glob("data/*/*/*/*.fits.gz")
 pool = Pool()
 pool.map(process_file, filenames)
