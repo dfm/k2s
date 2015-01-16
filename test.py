@@ -1,10 +1,16 @@
 from __future__ import print_function, division
 
+# Don't let numpy errors pass.
+import warnings
+warnings.simplefilter("error")
+
 import os
 import glob
 import fitsio
 import numpy as np
+import matplotlib.pyplot as pl
 from multiprocessing import Pool
+
 
 from k2s import TimeSeries, compute_cdpp
 
@@ -34,8 +40,6 @@ def process_file(fn):
     # if os.path.exists(outfn):
     #     return
 
-    print("{0} -> {1}".format(fn, outfn))
-
     # Read the data.
     data, hdr = fitsio.read(fn, header=True)
     table = np.empty(len(data["TIME"]), dtype=dt)
@@ -54,20 +58,30 @@ def process_file(fn):
                     data["QUALITY"])
 
     # Loop over the frames and copy over the output.
+    shape = None
     for i, frame in enumerate(ts.frames):
-        if not len(frame):
+        if not len(frame) or not np.any(frame.mask):
             continue
+
         # Save the brightest source to the results table.
         shape = frame.shape
         row = frame.coords[0]
         for k in ["x", "y"]:
             table[k][i] = row[k]
 
+    # Just skip it if none of the frames were acceptable.
+    if shape is None:
+        return
+
     # Find the median centroid of the star.
     m = np.isfinite(table["x"]) * np.isfinite(table["y"])
     cx, cy = np.median(table[m]["x"]), np.median(table[m]["y"])
     hdr["CENTROID_X"] = float(cx)
     hdr["CENTROID_Y"] = float(cy)
+
+    # pl.imshow(ts.frames[-1].img, cmap="gray", interpolation="nearest")
+    # pl.savefig("blah.png")
+    # assert 0
 
     # Choose the set of apertures.
     aps = []
@@ -78,20 +92,33 @@ def process_file(fn):
 
     # Loop over the frames and do the aperture photometry.
     for i, frame in enumerate(ts.frames):
-        if not len(frame):
+        if not hasattr(frame, "img") or not np.any(frame.mask):
             continue
         for j, mask in enumerate(aps):
+            # Choose the pixels in and out of the aperture.
+            m = mask * frame.mask
+            bgm = (~mask) * frame.mask
+
             # Skip if there are no good pixels in the aperture.
-            if not np.any(mask * frame.mask):
+            if not np.any(m):
                 continue
 
             # Estimate the background and flux.
-            bkg = np.median(frame.img[(~mask) * frame.mask])
-            table["flux"][i, j] = np.sum(frame.img[mask * frame.mask] - bkg)
+            if np.any(bgm):
+                bkg = np.median(frame.img[bgm])
+            else:
+                bkg = np.median(frame.img[frame.mask])
+            table["flux"][i, j] = np.sum(frame.img[m] - bkg)
             table["bkg"][i, j] = bkg
 
-    print("{0} good times.".format(np.sum(np.all(np.isfinite(table["flux"]),
-                                                 axis=1))))
+    # Compute the number of good times.
+    nt = int(np.sum(np.any(np.isfinite(table["flux"]), axis=1)))
+    hdr["N_GOOD_TIMES"] = nt
+    print("{0} -> {1} ; {2}".format(fn, outfn, nt))
+
+    # Skip it if there aren't *any* good times.
+    if nt == 0:
+        return
 
     # Save the output file.
     try:
@@ -112,20 +139,20 @@ def process_file(fn):
         ap_info[i]["cdpp12"] = compute_cdpp(t, f, 12.)
     fitsio.write(outfn, ap_info)
 
-    print(ap_info)
 
-    import matplotlib.pyplot as pl
-    m = np.isfinite(table["flux"][:, -1])
-    mu = np.median(table["flux"][:, -1][m])
-    pl.plot(table["time"], table["flux"][:, -1] / mu, ".k")
-    # pl.plot(table["time"], table["bkg"], ".r")
-    # pl.xlim(1940, 1975)
-    pl.savefig("blah.png")
+def wrap(fn):
+    try:
+        process_file(fn)
+    except:
+        print("failure: {0}".format(fn))
+        import traceback
+        traceback.print_exc()
+        raise
 
+# filenames = glob.glob("data/c1/201500000/85000/ktwo201585079-c01_lpd-targ.fits.gz")
+# map(process_file, filenames)
+# assert 0
 
-filenames = glob.glob("data/c0/202000000/86000/*202086255*.fits.gz")
-map(process_file, filenames)
-# print(filenames)
-# filenames = glob.glob("data/*/*/*/*.fits.gz")
-# pool = Pool()
-# pool.map(process_file, filenames)
+filenames = glob.glob("data/*/*/*/*.fits.gz")
+pool = Pool()
+pool.map(wrap, filenames)
