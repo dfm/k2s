@@ -1,26 +1,22 @@
 from __future__ import print_function, division
 
-# Don't let numpy errors pass.
-import warnings
-warnings.simplefilter("error")
-
 import os
 import glob
-import fitsio
 import numpy as np
 import matplotlib.pyplot as pl
 from multiprocessing import Pool
 
+from astropy.io import fits
+from astropy.wcs import WCS
 
-from k2s import TimeSeries, compute_cdpp
+from k2s import compute_cdpp
 
-apertures = np.arange(0.5, 10.5, 0.5)
+apertures = np.arange(0.5, 5.5, 0.5)
 dt = np.dtype([("cadenceno", np.int32), ("time", np.float32),
                ("timecorr", np.float32), ("pos_corr1", np.float32),
                ("pos_corr2", np.float32), ("quality", np.int32),
                ("flux", (np.float32, len(apertures))),
-               ("bkg", (np.float32, len(apertures))),
-               ("x", np.float32), ("y", np.float32)])
+               ("bkg", (np.float32, len(apertures)))])
 dt2 = np.dtype([("radius", np.float32), ("cdpp3", np.float32),
                 ("cdpp6", np.float32), ("cdpp12", np.float32)])
 
@@ -41,11 +37,12 @@ def process_file(fn):
     #     return
 
     # Read the data.
-    data, hdr = fitsio.read(fn, header=True)
+    hdus = fits.open(fn)
+    data = hdus[1].data
     table = np.empty(len(data["TIME"]), dtype=dt)
 
     # Initialize the new columns to NaN.
-    for k in ["x", "y", "flux", "bkg"]:
+    for k in ["flux", "bkg"]:
         table[k] = np.nan
 
     # Copy across the old columns.
@@ -53,51 +50,29 @@ def process_file(fn):
               "quality"]:
         table[k] = data[k.upper()]
 
-    # This step actually does the photometry.
-    ts = TimeSeries(data["TIME"], data["FLUX"], data["FLUX_ERR"],
-                    data["QUALITY"])
-
-    # Loop over the frames and copy over the output.
-    shape = None
-    for i, frame in enumerate(ts.frames):
-        if not len(frame) or not np.any(frame.mask):
-            continue
-
-        # Save the brightest source to the results table.
-        shape = frame.shape
-        row = frame.coords[0]
-        for k in ["x", "y"]:
-            table[k][i] = row[k]
-
-    # Just skip it if none of the frames were acceptable.
-    if shape is None:
-        return
-
-    # Find the median centroid of the star.
-    m = np.isfinite(table["x"]) * np.isfinite(table["y"])
-    cx, cy = np.median(table[m]["x"]), np.median(table[m]["y"])
-    hdr["CENTROID_X"] = float(cx)
-    hdr["CENTROID_Y"] = float(cy)
-
-    # pl.imshow(ts.frames[-1].img, cmap="gray", interpolation="nearest")
-    # pl.savefig("blah.png")
-    # assert 0
+    # Use the WCS to find the center of the star.
+    hdr = hdus[2].header
+    wcs = WCS(hdr)
+    cy, cx = wcs.wcs_world2pix(hdr["RA_OBJ"], hdr["DEC_OBJ"], 0.0)
 
     # Choose the set of apertures.
     aps = []
+    shape = data["FLUX"][0].shape
+    xi, yi = np.meshgrid(range(shape[0]), range(shape[1]), indexing="ij")
     for r in apertures:
         r2 = r*r
-        xi, yi = np.meshgrid(range(shape[0]), range(shape[1]), indexing="ij")
         aps.append((xi - cx) ** 2 + (yi - cy) ** 2 < r2)
 
     # Loop over the frames and do the aperture photometry.
-    for i, frame in enumerate(ts.frames):
-        if not hasattr(frame, "img") or not np.any(frame.mask):
+    for i, img in enumerate(data["FLUX"]):
+        fm = np.isfinite(img)
+        fm[fm] = img[fm] > 0.0
+        if not np.any(fm):
             continue
         for j, mask in enumerate(aps):
             # Choose the pixels in and out of the aperture.
-            m = mask * frame.mask
-            bgm = (~mask) * frame.mask
+            m = mask * fm
+            bgm = (~mask) * fm
 
             # Skip if there are no good pixels in the aperture.
             if not np.any(m):
@@ -105,27 +80,19 @@ def process_file(fn):
 
             # Estimate the background and flux.
             if np.any(bgm):
-                bkg = np.median(frame.img[bgm])
+                bkg = np.median(img[bgm])
             else:
-                bkg = np.median(frame.img[frame.mask])
-            table["flux"][i, j] = np.sum(frame.img[m] - bkg)
+                bkg = np.median(img[frame.mask])
+            table["flux"][i, j] = np.sum(img[m] - bkg)
             table["bkg"][i, j] = bkg
 
     # Compute the number of good times.
     nt = int(np.sum(np.any(np.isfinite(table["flux"]), axis=1)))
-    hdr["N_GOOD_TIMES"] = nt
     print("{0} -> {1} ; {2}".format(fn, outfn, nt))
 
     # Skip it if there aren't *any* good times.
     if nt == 0:
         return
-
-    # Save the output file.
-    try:
-        os.makedirs(os.path.split(outfn)[0])
-    except os.error:
-        pass
-    fitsio.write(outfn, table, clobber=True, header=hdr)
 
     # Save the aperture information and precision.
     ap_info = np.empty(len(apertures), dtype=dt2)
@@ -137,7 +104,20 @@ def process_file(fn):
         ap_info[i]["cdpp3"] = compute_cdpp(t, f, 3.)
         ap_info[i]["cdpp6"] = compute_cdpp(t, f, 6.)
         ap_info[i]["cdpp12"] = compute_cdpp(t, f, 12.)
-    fitsio.write(outfn, ap_info)
+
+    try:
+        os.makedirs(os.path.split(outfn)[0])
+    except os.error:
+        pass
+    hdr = hdus[1].header
+    hdr["CEN_X"] = float(cx)
+    hdr["CEN_Y"] = float(cy)
+    hdus_out = fits.HDUList([
+        fits.PrimaryHDU(header=hdr),
+        fits.BinTableHDU.from_columns(table),
+        fits.BinTableHDU.from_columns(ap_info),
+    ])
+    hdus_out.writeto(outfn, clobber=True)
 
 
 def wrap(fn):
@@ -153,6 +133,6 @@ def wrap(fn):
 # map(process_file, filenames)
 # assert 0
 
-filenames = glob.glob("data/*/*/*/*.fits.gz")
+filenames = glob.glob("data/c1/*/*/*.fits.gz")
 pool = Pool()
 pool.map(wrap, filenames)
