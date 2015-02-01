@@ -17,8 +17,7 @@ dt = np.dtype([("cadenceno", np.int32), ("time", np.float32),
                ("pos_corr2", np.float32), ("quality", np.int32),
                ("flux", (np.float32, len(apertures))),
                ("bkg", (np.float32, len(apertures)))])
-dt2 = np.dtype([("radius", np.float32), ("cdpp3", np.float32),
-                ("cdpp6", np.float32), ("cdpp12", np.float32)])
+dt2 = np.dtype([("radius", np.float32), ("cdpp6", np.float32)])
 
 
 def process_file(fn):
@@ -32,9 +31,9 @@ def process_file(fn):
     outfn = os.path.join("lightcurves", pre[len("data/"):],
                          a+"-"+b+"-lc.fits")
 
-    # # Don't overwrite.
-    # if os.path.exists(outfn):
-    #     return
+    # Don't overwrite.
+    if os.path.exists(outfn):
+        return
 
     # Read the data.
     hdus = fits.open(fn)
@@ -101,9 +100,9 @@ def process_file(fn):
 
         # Compute the precision.
         t, f = table["time"], table["flux"][:, i]
-        ap_info[i]["cdpp3"] = compute_cdpp(t, f, 3.)
+        # ap_info[i]["cdpp3"] = compute_cdpp(t, f, 3.)
         ap_info[i]["cdpp6"] = compute_cdpp(t, f, 6.)
-        ap_info[i]["cdpp12"] = compute_cdpp(t, f, 12.)
+        # ap_info[i]["cdpp12"] = compute_cdpp(t, f, 12.)
 
     try:
         os.makedirs(os.path.split(outfn)[0])
@@ -114,10 +113,13 @@ def process_file(fn):
     hdr["CEN_Y"] = float(cy)
     hdus_out = fits.HDUList([
         fits.PrimaryHDU(header=hdr),
-        fits.BinTableHDU.from_columns(table),
+        fits.BinTableHDU.from_columns(table, header=hdr),
         fits.BinTableHDU.from_columns(ap_info),
     ])
     hdus_out.writeto(outfn, clobber=True)
+
+    hdus.close()
+    hdus_out.close()
 
 
 def wrap(fn):
